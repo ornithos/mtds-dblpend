@@ -248,12 +248,12 @@ end
     generate_data(;N=10, Nvalid=1, Ntest=1, tT=140, _seed=1240,
         max_energy=40, damping_vals=nothing, dt=0.05)
 
-Generate sequences of length `tT` from the cross product of the damping_vals
+Generate sequences of length `tT` from the cartesian product of the damping_vals
 (defaults to
     [0.0,  0.01,  0.02,  0.05,  0.1,  0.20,  0.30,  0.50,  0.75,  1.00]
-for each bob). Each element in this crossprod generates `N` sequences (def 10)
+for each bob). Each element in this cart. prod generates `N` sequences (def 10)
 resulting in (10×10)×10 sequences of length `tT`. Also a validation and test
-set obtain `Nvalid` and `Ntest` seqeunces from this cross product too. The
+set obtain `Nvalid` and `Ntest` seqeunces from this cartesian product too. The
 initial conditions are sampled from `sample_init` with a random energy with
 a maximum specified as `max_energy`, with a bias towards higher energy. The
 default behaviour is to sample the sequence every `dt=0.05` seconds, and hence

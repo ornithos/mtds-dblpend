@@ -1,10 +1,11 @@
+module modelutils
+
 using Flux   # must be Flux@0.90
 using BSON
 using ArgCheck
 
-if Flux.has_cuarrays()
-    using CuArrays
-end
+export save, load!, chan3cat, unsqueeze, MultiDense, mlp, BRNNenc
+
 
 e_k(T, n, k) = begin; out = zeros(T, n); out[k] = 1; out; end
 e_k(n, k) = e_k(Float32, n, k)
@@ -12,6 +13,19 @@ e1(T, n) = e_k(T, n, 1)
 e1(n) = e_k(Float32, n, 1)
 
 unsqueeze(xs, dim) = reshape(xs, (size(xs)[1:dim-1]..., 1, size(xs)[dim:end]...));
+
+randn_repar(σ::AbstractArray, n, d, stochastic=true) = !stochastic ? zeros(n, d) : σ .* randn(n,d)
+
+if Flux.has_cuarrays()
+    using CuArrays
+    # note I'm using cu(zeros(...)), cu(randn(...)), CuArrays.randn(...) in particular occasionally
+    # (apparently non-deterministically) kept bugging out on the GPU side :/.
+    randn_repar(σ::CuArray, n, d, stochastic=true) = !stochastic ? cu(zeros(n, d)) : σ .* cu(randn(n,d))
+end
+
+# Add a third channel to a 2-channel image Tensor
+chan3cat(x::AbstractArray{T,4}) where T = cat(x, zero(x)[:,:,1:1,:], dims=3)
+chan3cat(x::AbstractArray{T,3}) where T = cat(x, zero(x)[:,:,1:1], dims=3)
 
 """
     MultiDense(Dense(in_1, out_1), Dense(in_2, out_2))
@@ -87,9 +101,8 @@ end
 Flux.@treelike BRNNenc
 
 function Base.show(io::IO, l::BRNNenc)
-  fs = [d.σ == identity ? "" : ", " * string(d.σ) for d in [l.Dense1, l.Dense2]]
   print(io, "Bidirectional RNN. (Forward / Backward):")
-  show(l.forward); show(l.backward)
+  show(l.forward); print(", "); show(l.backward)
 end
 
 
@@ -151,12 +164,12 @@ pre-specified models; this allows the file format to be agnostic to the original
 model.
 """
 function load!(ps::Flux.Params, fname::String)
-    tf = Tracker.data(first(ps)) isa CuArray ? gpu : identity
+    tf = Flux.has_cuarrays() && Tracker.data(first(ps)) isa CuArray ? gpu : identity
     _load_pars!(ps, BSON.load(fname)[:ps], tf)
 end
 
 function load!(ps::Flux.Params, opt::Flux.ADAM, fname::String)
-    tf = Tracker.data(first(ps)) isa CuArray ? cu : identity
+    tf = Flux.has_cuarrays() && Tracker.data(first(ps)) isa CuArray ? cu : identity
     f=BSON.load(fname)
     _load_pars!(ps, f[:ps], tf)
     opt.eta, opt.beta = f[:etabeta]
@@ -186,4 +199,7 @@ function _load_pars!(ps_to::Flux.Params, ps_from::Vector, tf::Function)
         end
         rethrow(e)
     end
+end
+
+
 end
