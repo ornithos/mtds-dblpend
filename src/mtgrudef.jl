@@ -8,7 +8,7 @@ for A ∈ ℝ^{n × m × d}, X ∈ ℝ^{n × d}. Performs ``n`` matrix-vec multi
 
     A[i,:,:] * X[i,:]
 
-for ``i \in 1,\ldots,n``. This is performed via expansion of `X` and can be
+for ``i \\in 1,\\ldots,n``. This is performed via expansion of `X` and can be
 efficiently evaluated using BLAS operations, which (I have assumed!) will often
 be faster than a loop, especially in relation to AD and GPUs.
 """

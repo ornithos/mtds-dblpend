@@ -1,5 +1,6 @@
 using Flux   # must be Flux@0.90
 using BSON
+using ArgCheck
 
 if Flux.has_cuarrays()
     using CuArrays
@@ -35,6 +36,27 @@ function Base.show(io::IO, l::MultiDense)
   print(io, ", (", size(l.Dense2.W, 2), ", ", size(l.Dense2.W, 1), fs[2], "))")
 end
 
+"""
+    mlp(units::Tuple; activation::Function, final::Function)
+
+A convenience wrapper for defining a fully connected feedforward (MLP)
+component. `units` is a tuple which specifies the number of units in each layer,
+with the first and last components taken to be the inputs / outputs of the MLP;
+all intermediate units are hidden layers.
+
+Example:
+    mlp((20,128,128,40)) === Chain(Dense(20,128,relu), Dense(128,128,relu), Dense(128, 40))
+
+The activation functions can be customized via `activation=...` (for hidden layers)
+and `final=...` for the final layer.
+"""
+function mlp(units::Tuple; activation::Function=relu, final::Function=identity)
+    last = length(units)-1
+    layers = [Dense(i,j, l==last ? final : activation) for (l,(i,j)) in
+            enumerate(zip(units[1:end-1], units[2:end]))]
+    return last == 1 ? layers[1] : Chain(layers...)
+end
+mlp(x...; activation::Function=relu, final::Function=identity) = mlp(x, activation=activation, final=final)
 
 """
     BRNNenc(d_in, d_state)
