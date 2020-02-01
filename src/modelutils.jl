@@ -14,13 +14,13 @@ e1(n) = e_k(Float32, n, 1)
 
 unsqueeze(xs, dim) = reshape(xs, (size(xs)[1:dim-1]..., 1, size(xs)[dim:end]...));
 
-randn_repar(σ::AbstractArray, n, d, stochastic=true) = !stochastic ? zeros(n, d) : σ .* randn(n,d)
+randn_repar(σ::AbstractArray, n, d, stochastic=true) = !stochastic ? zeros(Float32, n, d) : σ .* randn(Float32, n,d)
 
 if Flux.has_cuarrays()
     using CuArrays
     # note I'm using cu(zeros(...)), cu(randn(...)), CuArrays.randn(...) in particular occasionally
     # (apparently non-deterministically) kept bugging out on the GPU side :/.
-    randn_repar(σ::CuArray, n, d, stochastic=true) = !stochastic ? cu(zeros(n, d)) : σ .* cu(randn(n,d))
+    randn_repar(σ::CuArray, n, d, stochastic=true) = !stochastic ? cu(zeros(Float32, n, d)) : σ .* cu(randn(Float32, n,d))
 end
 
 # Add a third channel to a 2-channel image Tensor

@@ -1,7 +1,7 @@
 module datagen
 
 using Random, Distributions
-using OrdinaryDiffEq
+using OrdinaryDiffEq, Flux
 
 export generate_data
 
@@ -309,5 +309,53 @@ function generate_data(;N=10, Nvalid=1, Ntest=1, tT=140, _seed=1240,
     return data_xy, data_θ, data_meta
 end
 
+
+rand_timeseries(data_xy, data_meta, tT, nbatch; variable_len=false,
+                time_slices=true, entire_seq=false, entire_step=1) =
+    rand_timeseries(Random.GLOBAL_RNG, data_xy, data_meta, tT, nbatch;
+                    variable_len=variable_len, time_slices=time_slices,
+                    entire_seq=entire_seq, entire_step=entire_step)
+
+"""
+    rand_timeseries([rng::Random.AbstractRNG,] data_xy, data_meta, tT, nbatch;
+                         variable_len=false, time_slices=true, entire_seq=false, entire_step=1)
+
+Generate `nbatch` time series from the double pendulum dataset represented by
+the (train/test/valid) split given by `data_xy` and `data_meta`. These are
+generated as in the `generate_data` function (see docstring). Each time series
+will be of length `tT`.
+
+Options: if dataset has variable length time series (I think it no longer can!)
+then use `variable_len=true` to weight each time series by its length during
+random sampling. For inputs to recurrent models it is often helpful to have the
+data in timeslice form, i.e. a vector where each element corresponds to the
+input at a time `t` for a given batch. See `time_slices=true/false`. Some models
+encode the entire sequence length to infer the latent variable for which the
+`entire_seq=true` option may be helpful. This may also be returned for every kth
+value, for which specify `entire_step=k`.
+"""
+function rand_timeseries(rng::Random.AbstractRNG, data_xy, data_meta, tT, nbatch;
+                         variable_len=false, time_slices=true, entire_seq=false, entire_step=1)
+    if variable_len
+        lens = data_meta[1] .- (tT - 1)
+        seqixs = rand(rng, Categorical(lens/sum(lens)), nbatch)
+        lens = lens[seqixs]
+    else
+        N = length(data_meta[1])
+        seqixs = rand(rng, 1:N, nbatch)
+        lens = fill(data_meta[1][1], nbatch)
+    end
+    ixs = [rand(1:l-tT+1) for l in lens]
+    y = Flux.batch([data_xy[s][i .+ (0:tT-1), :] for (s,i) in zip(seqixs,ixs)])
+    (time_slices) && (y = [y[tt,:,:] for tt in 1:tT])
+
+    if entire_seq
+        variable_len && @warn "Cannot batch variable_len sequences in general. This may error."
+        fullseq = Flux.batch([data_xy[s] for s in seqixs])
+        (time_slices) && (fullseq = [fullseq[tt,:,:] for tt in 1:entire_step:tT])
+        return y, fullseq, seqixs, ixs
+    end
+    return y, seqixs, ixs
+end
 
 end

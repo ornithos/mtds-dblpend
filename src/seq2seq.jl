@@ -55,14 +55,13 @@ end
 Flux.@treelike Seq2SeqModel
 unpack(m::Seq2SeqModel) = Flux.children(m)[1:4] # unpack struct; exclude `d`.
 
-@eval modelutils load!(m::Seq2SeqModel, fname::String) = load!(Flux.params(m), fname)
+modelutils.load!(m::Seq2SeqModel, fname::String) = load!(Flux.params(m), fname)
 
 function Base.show(io::IO, l::Seq2SeqModel)
     has_cnn = length(l.encoder) != 1
     out_type = has_cnn ? "CNN" : l.generator.layers[end][end] isa MultiDense ? "Probabilistic" : "Deterministic"
     print(io, "Seq2SeqModel(dim=", l.d, ", ", out_type, ")")
 end
-
 
 # ≡ __call__
 function (m::Seq2SeqModel)(y::AbstractVector; T_steps=70, T_enc=10, reset=true, stoch=true)
