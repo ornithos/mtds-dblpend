@@ -291,7 +291,7 @@ function generate_data(;N=10, Nvalid=1, Ntest=1, tT=140, _seed=1240,
         for (ls, tvt) in zip(lens, [:train, :valid, :test])
             for l in ls
                 energy = max_energy*rand(rng, Beta(3,1))  # heuristically chosen: bias towards larger energy
-                u0 = sample_init(energy);   # original: [2π/3 + 0.00001; 0; π/3 + 0.00001; 0.0]
+                u0 = sample_init(energy; rng=rng);   # original: [2π/3 + 0.00001; 0; π/3 + 0.00001; 0.0]
                 lc = ceil(Int, l*dt)
                 states, traj = solve_dblpend(lc; u0=u0, α₁=α₁, α₂=α₂, dt=dt)
                 data_pend = convert(Array{Float32}, Matrix(traj'))
