@@ -4,7 +4,7 @@ using Flux   # must be Flux@0.90
 using BSON
 using ArgCheck
 
-export save, load!, chan3cat, unsqueeze, MultiDense, mlp, BRNNenc
+export save, load!, chan3cat, unsqueeze, MultiDense, mlp, BRNNenc, randn_repar
 
 
 e_k(T, n, k) = begin; out = zeros(T, n); out[k] = 1; out; end

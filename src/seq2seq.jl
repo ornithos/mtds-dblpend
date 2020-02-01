@@ -1,6 +1,6 @@
 module seq2seq
 
-using Flux, ArgCheck
+using Flux, ArgCheck, StatsBase
 
 using ..modelutils
 import ..modelutils: load!, randn_repar
@@ -38,7 +38,7 @@ This type can be called via
     m(y::Vector)
 ```
 where `y` is a vector of slices of the sequence for the encoder. This means each
-`y[i]` is an `AbstractMatrix` of size ``d \\times n_{\\text{batch}}`.
+`y[i]` is an `AbstractMatrix` of size ``d \\times n_{\\text{batch}}``.
 
 Options include `T_enc`, `T_steps` (already discussed), `reset` (which performs
 a state reset before execution; true by default), and `stoch`, whether to
@@ -55,7 +55,7 @@ end
 Flux.@treelike Seq2SeqModel
 unpack(m::Seq2SeqModel) = Flux.children(m)[1:4] # unpack struct; exclude `d`.
 
-modelutils.load!(m::Seq2SeqModel, fname::String) = load!(Flux.params(m), fname)
+@eval modelutils load!(m::Seq2SeqModel, fname::String) = load!(Flux.params(m), fname)
 
 function Base.show(io::IO, l::Seq2SeqModel)
     has_cnn = length(l.encoder) != 1
@@ -82,6 +82,30 @@ function (m::Seq2SeqModel)(y::AbstractVector; T_steps=70, T_enc=10, reset=true, 
     yhats = [generator(gmove(zeros(1, nbatch))) for t in 1:T_steps]
 end
 
+
+function nllh(m::Seq2SeqModel, y::AbstractVector; T_steps=70, T_enc=10, reset=true, stoch=true)
+    yhats = m(y; T_steps=T_steps, T_enc=T_enc, reset=reset, stoch=stoch)
+    sum([sum(Flux.logitbinarycrossentropy.(ŷ, y)) for (ŷ, y) in zip(yhats, y)])
+end
+
+StatsBase.loglikelihood(m::Seq2SeqModel, y::AbstractVector; T_steps=70, T_enc=10, reset=true,
+    stoch=true) = -nllh(m, y; T_steps=T_steps, T_enc=T_enc, reset=reset, stoch=stoch)
+
+"""
+    create_model(d_x, d_x0, d_y, d_enc_state; encoder=:LSTM,
+    cnn=false, out_heads=1, d_hidden=d_x)
+
+Create `Seq2SeqModel` with the number of hidden units in the recurrent
+generative model as `d_x`, the size of the latent variable for the initial state
+as `d_x0` (typically ``d_x0 \\ll d_x``), `d_y` the dimension of the observations
+and `d_enc_state` the number of hidden units in the recurrent encoder. This
+encoder can be specified as `:LSTM`, `:GRU` or `:Bidirectional`. If the
+observations are video data and one wishes to use a CNN to encode and decode,
+specify `cnn=true`. By default the `Seq2SeqModel` looks to make a point estimate
+of the future series, but specifying `out_heads=2` will result in uncertainty
+estimation too. Finally `d_hidden` specifies the number of hidden units in non
+CNN decoders.
+"""
 function create_model(d_x, d_x0, d_y, d_enc_state; encoder=:LSTM,
     cnn=false, out_heads=1, d_hidden=d_x)
 
@@ -127,9 +151,9 @@ function create_model(d_x, d_x0, d_y, d_enc_state; encoder=:LSTM,
     gen_rnn = GRU(1, d_x)
 
     if out_heads == 1 && !cnn
-        decoder = Chain(Dense(d_x, d_x, relu), Dense(d_x, d_y, identity))
+        decoder = Chain(Dense(d_x, d_hidden, relu), Dense(d_hidden, d_y, identity))
     elseif out_heads == 2 && !cnn
-        decoder = Chain(Dense(d_x, d_x, relu), MultiDense(Dense(d_x, d_y, identity), Dense(d_x, d_y, identity)))
+        decoder = Chain(Dense(d_x, d_hidden, relu), MultiDense(Dense(d_hidden, d_y, identity), Dense(d_hidden, d_y, identity)))
     else    # cnn
         decoder = Chain(
             Dense(d_x, d_conv_result, identity),
