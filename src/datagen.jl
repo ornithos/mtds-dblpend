@@ -1,6 +1,9 @@
+module datagen
+
 using Random, Distributions
 using OrdinaryDiffEq
 
+export generate_data
 
 clip(x, vmin, vmax) = max(min(x, vmax), vmin)
 
@@ -210,7 +213,7 @@ energy_dblpend(θ₁, θ̇₁, θ₂, θ̇₂, r₁=1,r₂=1) = sum(2*f(θ₁,θ
 ##                                                                            ##
 ################################################################################
 
-rsgn() = rand([-1,+1])   # random sign
+rsgn(; rng=Random.GLOBAL_RNG) = rand(rng, [-1,+1])   # random sign
 
 
 """
@@ -229,13 +232,13 @@ quadratic formula for θ̇₂ is fixed as the *opposite* sign of θ̇₁. This a
 avoid some of the synchronization between the pendula that I noticed from
 sampling uniformly at random.
 """
-function sample_init(target=3.5*9.8)
+function sample_init(target=3.5*9.8; rng=Random.GLOBAL_RNG)
     H = target/9.8
     ul = acos(max(1 - H/2, -1))
-    θ₁ = rsgn()*rand(Uniform(ul/2, ul))
-    θ₂ = let a=acos(clip(3-H-2*cos(θ₁), -1, 1)); rsgn()*rand(Uniform(a/2, a)); end
+    θ₁ = rsgn(rng=rng)*rand(rng, Uniform(ul/2, ul))
+    θ₂ = let a=acos(clip(3-H-2*cos(θ₁), -1, 1)); rsgn(rng=rng)*rand(rng, Uniform(a/2, a)); end
     κ = 9.8*((H-3) + 2*cos(θ₁) + cos(θ₂))  # remaining energy
-    θ̇₁ = rand(Uniform(0, sqrt(κ)))
+    θ̇₁ = rand(rng, Uniform(0, sqrt(κ)))
     b, c = 2*θ̇₁*cos(θ₁-θ₂), 2*(θ̇₁^2 - κ)
     θ̇₂ = 0.5*(-b -sign(θ̇₁)*sqrt(b^2-4*c))
     return [θ₁, θ̇₁, θ₂, θ̇₂]
@@ -272,7 +275,9 @@ and initial conditions] of each sequence.
 """
 function generate_data(;N=10, Nvalid=1, Ntest=1, tT=140, _seed=1240,
         max_energy=40, damping_vals=nothing, dt=0.05)
-    Random.seed!(_seed)
+
+    rng = MersenneTwister()
+    Random.seed!(rng, _seed)
 
     damping_vals = something(damping_vals,
         [0.0,  0.01,  0.02,  0.05,  0.1,  0.20,  0.30,  0.50,  0.75,  1.00])
@@ -285,7 +290,7 @@ function generate_data(;N=10, Nvalid=1, Ntest=1, tT=140, _seed=1240,
         lens = [repeat([tT], N), repeat([tT], Nvalid), repeat([tT], Ntest)]
         for (ls, tvt) in zip(lens, [:train, :valid, :test])
             for l in ls
-                energy = max_energy*rand(Beta(3,1))  # heuristically chosen: bias towards larger energy
+                energy = max_energy*rand(rng, Beta(3,1))  # heuristically chosen: bias towards larger energy
                 u0 = sample_init(energy);   # original: [2π/3 + 0.00001; 0; π/3 + 0.00001; 0.0]
                 lc = ceil(Int, l*dt)
                 states, traj = solve_dblpend(lc; u0=u0, α₁=α₁, α₂=α₂, dt=dt)
@@ -302,4 +307,7 @@ function generate_data(;N=10, Nvalid=1, Ntest=1, tT=140, _seed=1240,
     data_meta = Dict(k=>(convert(Vector{Int}, v[1,:]), v[1,:]/sum(v[1,:]), v[2,:], v[3:end,:]) for (k,v) in data_meta)
 
     return data_xy, data_θ, data_meta
+end
+
+
 end
