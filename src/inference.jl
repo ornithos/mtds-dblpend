@@ -3,6 +3,12 @@ module infer
 using Distributions, StatsBase, StatsFuns, Random
 using LinearAlgebra, Clustering
 using Formatting, Parameters
+using Flux
+
+if Flux.has_cuarrays()
+    using CuArrays
+    CuArrays.@cufunc Flux.logitbinarycrossentropy(logŷ, y) = (1 - y)*logŷ - logσ(logŷ)
+end
 
 
 columns(x::AbstractArray) = [x[:,i] for i in range(1,stop=size(x,2))]
@@ -343,14 +349,14 @@ function amis(log_f, pis, mus, covs::AbstractArray, S::AbstractMatrix, W::Abstra
     #     end
     # end
 
-    ν_S, ν_W = S, W
+    ν_S, ν_W, log_W = S, W, nothing
     for i = 1:nepochs
         pis, mus, covs = gmm_custom(ν_S, ν_W, pis, mus, covs; max_iter=3, tol=1e-3, verbose=false);
         ν_S = sample_from_gmm(gmm_smps, pis, mus, covs*IS_tilt, shuffle=false)
 
-        ν_W = log_f(ν_S) - gmm_llh(ν_S, 1, pis, mus, covs*IS_tilt);
-        ν_W = exp.(vec(ν_W));
-        display(eff_ss(ν_W))
+        log_W = log_f(ν_S) - gmm_llh(ν_S, 1, pis, mus, covs*IS_tilt);
+        ν_W = softmax(vec(log_W));
+
 #         (debug && i <= 5) && display(reduce(hcat, [log_f(ν_S), gmm_llh(ν_S, 1, cpis, cmus, ccovs*IS_tilt), ν_W]))
         (debug && i <= 5) && begin; ax = axs[i,1]; abcsmcs.plot_is_vs_target(ν_S[:,1:2], ν_W, ax=ax, c_num=7);
             for j = 1:k ax.plot(columns(AxPlot.utils.gaussian_2D_level_curve_pts(mus[j,1:2], covs[1:2,1:2,j]))...); end
@@ -358,7 +364,7 @@ function amis(log_f, pis, mus, covs::AbstractArray, S::AbstractMatrix, W::Abstra
 
         (i == nepochs) || (eff_ss(ν_W) >= terminate * gmm_smps) && break
     end
-    return ν_S, ν_W, pis, mus, covs
+    return ν_S, log_W, pis, mus, covs
 end
 
 
