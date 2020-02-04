@@ -203,7 +203,7 @@ function (m::MTSeqModel_E3)(x0::AbstractVecOrMat, z::AbstractVecOrMat, c::Abstra
     # Generative model
     # --------------------------------------------------
     if m.mtbias_only
-        gen_model.layers[1].state = x0decoder(x0)
+        gen_model.state = x0decoder(x0)
         mtbias = mtbias_decoder(vcat(z, c))   # if linear, this is just the identity ∵ GRUCell.Wi
         return [dec_tform(gen_model(mtbias)) for t in 1:T_steps]
     else
@@ -261,7 +261,7 @@ end
 
 function create_model(d_x, d_x0, d_y, d_enc_state, d_mt, d_chaos; encoder=:GRU,
     cnn=false, out_heads=1, d_hidden=d_x, mtbias_only=false, d_hidden_mt=32,
-    mt_is_linear=true)
+    mt_is_linear=true, decoder_fudge_layer=false)
 
     @assert !(out_heads > 1 && cnn) "cannot have multiple output heads and CNN."
     @argcheck out_heads in 1:2
@@ -321,13 +321,21 @@ function create_model(d_x, d_x0, d_y, d_enc_state, d_mt, d_chaos; encoder=:GRU,
         gen_rnn = GRU(_d_in, d_x)
     end
 
+    if decoder_fudge_layer
+        # accidental additional layer in decoder for full MT-model.
+        # (This is really low capacity. 64->64 unit relu; if anything, will probably reduce performance.)
+        fudge_layer = Dense(d_x, d_x, relu)
+    else
+        fudge_layer = identity
+    end
+
     if out_heads == 1 && !cnn
         decoder = Chain(Dense(d_x, d_hidden, relu), Dense(d_hidden, d_y, identity))
     elseif out_heads == 2 && !cnn
         decoder = Chain(Dense(d_x, d_hidden, relu), MultiDense(Dense(d_hidden, d_y, identity), Dense(d_hidden, d_y, identity)))
     else    # cnn
         decoder = Chain(
-            Dense(d_x, d_x, relu),
+            fudge_layer,
             Dense(d_x, d_conv_result, identity),
             x->reshape(x, 4, 4, N_FILT, :),                               # out: 4 × 4 × 32 × nbatch
             ConvTranspose((3,3), N_FILT=>N_FILT, relu, stride=2),         # out: 9 × 9 × 16 × nbatch
@@ -373,6 +381,33 @@ end
 ##                                                                            ##
 ################################################################################
 
+function online_inference_BCE(m::MTSeqModel_E3, x0::AbstractVecOrMat, z::AbstractVecOrMat,
+    c::AbstractVecOrMat, y::AbstractVector; T_steps=length(y))
+
+    x0decoder, mtbias_decoder, gen_model, dec_tform = unpack(m)[8:11]
+
+    # Generative model
+    # --------------------------------------------------
+    if m.mtbias_only
+        gen_model.state = x0decoder(x0)
+        mtbias = mtbias_decoder(vcat(z, c))   # if linear, this is just the identity ∵ GRUCell.Wi
+
+        llh = map(1:T_steps) do t
+            _nllh_bernoulli_per_batch(dec_tform(gen_model(mtbias)), y[t])  # y broadcasts over the batch implicitly
+        end
+    else
+        posterior_grus = gen_model(vcat(z, c)) # output: BatchedGRU (def. above)
+        posterior_grus.state = x0decoder(x0)  # 2×linear d_x0 × nbatch → d_x × nbatch
+
+        llh = map(1:T_steps) do t
+            _nllh_bernoulli_per_batch(dec_tform(posterior_grus()), y[t])  # y broadcasts over the batch implicitly
+        end
+    end
+    return reduce(vcat, llh)
+end
+
+
+
 function _nllh_bernoulli(m::MTSeqModel_E3, y::AbstractVector, yfull::AbstractVector;
         T_steps=70, T_enc=10, stoch=true)
     yhats = m(y, yfull; T_steps=T_steps, T_enc=T_enc, stoch=stoch)
@@ -381,6 +416,11 @@ end
 
 _nllh_bernoulli(ŷ::AbstractVector, y::AbstractVector) =
     sum([sum(Flux.logitbinarycrossentropy.(ŷŷ, yy)) for (ŷŷ, yy) in zip(ŷ, y)])
+
+_nllh_bernoulli(ŷ::AbstractArray, y::AbstractArray) = sum(Flux.logitbinarycrossentropy.(ŷ, y))
+
+_nllh_bernoulli_per_batch(ŷ::AbstractArray, y::AbstractArray) =
+    let n=size(ŷ)[end]; res=Flux.logitbinarycrossentropy.(ŷ, y); sum(reshape(res, :, n), dims=1); end
 
 function _nllh_gaussian(m::MTSeqModel_E3, y::AbstractVector, yfull::AbstractVector;
         T_steps=70, T_enc=10, stoch=true)
