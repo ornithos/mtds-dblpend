@@ -392,20 +392,41 @@ function online_inference_BCE(m::MTSeqModel_E3, x0::AbstractVecOrMat, z::Abstrac
         gen_model.state = x0decoder(x0)
         mtbias = mtbias_decoder(vcat(z, c))   # if linear, this is just the identity ∵ GRUCell.Wi
 
-        llh = map(1:T_steps) do t
+        nllh = map(1:T_steps) do t
             _nllh_bernoulli_per_batch(dec_tform(gen_model(mtbias)), y[t])  # y broadcasts over the batch implicitly
         end
     else
         posterior_grus = gen_model(vcat(z, c)) # output: BatchedGRU (def. above)
         posterior_grus.state = x0decoder(x0)  # 2×linear d_x0 × nbatch → d_x × nbatch
 
-        llh = map(1:T_steps) do t
+        nllh = map(1:T_steps) do t
             _nllh_bernoulli_per_batch(dec_tform(posterior_grus()), y[t])  # y broadcasts over the batch implicitly
         end
     end
-    return reduce(vcat, llh)
+    return reduce(vcat, nllh)
 end
 
+
+function online_inference_single_BCE(m::MTSeqModel_E3, h0::AbstractVecOrMat, z::AbstractVecOrMat,
+    c::AbstractVecOrMat, y::AbstractArray)
+
+    mtbias_decoder, gen_model, dec_tform = unpack(m)[9:11]
+
+    # Generative model
+    # --------------------------------------------------
+    if m.mtbias_only
+        gen_model.state = h0
+        mtbias = mtbias_decoder(vcat(z, c))
+        h_new = gen_model(mtbias)
+        nllh = _nllh_bernoulli_per_batch(dec_tform(h_new), y)
+    else
+        posterior_grus = gen_model(vcat(z, c)) # output: BatchedGRU (def. above)
+        posterior_grus.state = h0  # 2×linear d_x0 × nbatch → d_x × nbatch
+        h_new = posterior_grus()
+        nllh = _nllh_bernoulli_per_batch(dec_tform(h_new), y)
+    end
+    return nllh, h_new
+end
 
 
 function _nllh_bernoulli(m::MTSeqModel_E3, y::AbstractVector, yfull::AbstractVector;

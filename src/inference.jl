@@ -6,8 +6,9 @@ using Formatting, Parameters
 using Flux
 
 if Flux.has_cuarrays()
-    using CuArrays
-    CuArrays.@cufunc Flux.logitbinarycrossentropy(logŷ, y) = (1 - y)*logŷ - logσ(logŷ)
+    println("Using CuArrays")
+    using CuArrays: @cufunc
+    Flux.logitbinarycrossentropy(logŷ, y) = (1 - y)*logŷ - logσ(logŷ)
 end
 
 
