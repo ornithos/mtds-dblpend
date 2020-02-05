@@ -44,6 +44,47 @@ function logsumexprows(X::AbstractArray{T}) where {T<:Real}
 end
 
 
+"""
+    multicategorical_kitagawa(p::Vector{T}, m::Int64)
+
+Draw `m` samples from the Categorical distribution defined by the probability
+vector `p`. (Note that computationally there is no advantage to enforcing that
+`p` sums to one, and hence ``\\sum_i p_i`` may be any positive number; it will
+be implicitly renormalized.) This may be considered a stratified multinomial
+sample, where the sample space is pre-partitioned into `m` intervals, each of
+which obtains one random draw. Nevertheless, the number of repetitions of each
+particle does not follow a multinomial distribution hence my clunky name,
+"multicategorical". This follows the description given in Hol et al. 2006
+("On Resampling Algorithms for Particle Filters"), but of course following
+Kitagawa, 1996.
+"""
+function multicategorical_kitagawa(p::Vector{T}, m::Int64) where T <: AbstractFloat
+    n = length(p)
+    x = zeros(Int, m)     # return
+    interval = sum(p)/m   # stratified intervals on [0,1) * sum(p) [sum p = 1 normally]
+    cs = p[1]             # cum probability (calc online)
+    i = 1                 # category index
+#     println(" cs     lb    r     smp")
+    for mm in 1:m
+        lb = (mm-1)*interval
+        r = rand()*interval
+        while cs < lb + r
+#             println(format("{:.3f} {:.3f} {:.3f} {:.3f}", cs, lb, r, lb+r))
+            i += 1
+            if i == n
+                x[mm:end] .= i
+                return x
+            end
+            @inbounds cs += p[i]
+        end
+#         println(format("{:.3f} {:.3f} {:.3f} {:.3f}", cs, lb, r, lb+r))
+#         println("Choose i = ", i)
+        @inbounds x[mm] = i
+    end
+    return x
+end
+
+
 ################################################################################
 ##                                                                            ##
 ##                  Gaussian Mixture Model Utils                              ##
