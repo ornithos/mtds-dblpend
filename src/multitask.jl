@@ -40,12 +40,6 @@ mutable struct MTGRU_NoU{F}
     G::F
 end
 
-mutable struct BatchedGRUCell_NoU{A,W}
-    Wh::A
-    b::W
-    h::W
-end
-
 """
     MTGRU_NoU(N, G)
 Multi-task GRU (Gated Recurrent Unit) model. Produces a GRU layer
@@ -76,6 +70,44 @@ Base.show(io::IO, l::MTGRU_NoU) =
 
 
 """
+  MTGRU_NoU_fixb(N, G)
+Multi-task GRU (Gated Recurrent Unit) model. Produces a GRU layer
+for each value of `z` ∈ Rᵈ which depends on the map `G` inside
+the MTGRU. N = out dimension, G: Rᵈ->R^{nLSTM}. z can be batched
+as `z` ∈ R^{d × nbatch}. This version of the `MTGRU_NoU` does not
+adapt the offset vector `b` in the GRU, but learns a fixed value
+for all `z`.
+
+In order to simplify the implementation, there is no input depen-
+dent evolution (hence no `U`s, and hence no `Wi`). It is
+straight-forward to extend to this case, should it be reqd.
+"""
+mutable struct MTGRU_NoU_fixb{F,V}
+  N::Int
+  G::F
+  b::V
+end
+
+
+function (m::MTGRU_NoU_fixb)(z, h=nothing)
+  N, nB = m.N, size(z, 2)
+  λ = m.G(z)
+  Wh = reshape(λ, N*3, N, nB)
+  b = m.b
+  open_forget_gate = zero(b)   # no backprop, and hence not tracked, even if `b` is.
+  open_forget_gate[gate(N, 2), :] .= 1
+  b += open_forget_gate
+  h = something(h, Flux.param(zero(b)))
+
+  Flux.Recur(BatchedGRUCell_NoU(Wh, b, h))
+end
+
+Flux.@treelike MTGRU_NoU_fixb
+Base.show(io::IO, l::MTGRU_NoU_fixb) =
+print(io, "Multitask-GRU-fixb(", l.N, ", ", typeof(l.G), ", no inputs)")
+
+
+"""
     BatchedGRUCell_NoU(Wh, b, h)
 Multi-task GRU Cell (which takes no input).
 `Wh`, `b`, `h` are the (concatenated) transformation matrices,
@@ -86,6 +118,13 @@ step evolution of the hidden state and return the current value.
 The cell is implemented in batch-mode, and the final dimension of
 each quantity is the batch index.
 """
+mutable struct BatchedGRUCell_NoU{A,W}
+    Wh::A
+    b::W
+    h::W
+end
+
+
 function (m::BatchedGRUCell_NoU)(h, x=nothing)
   b, o = m.b, size(h, 1)
   gh = batch_matvec(m.Wh, h)
@@ -439,11 +478,13 @@ end
 
 function create_model(d_x, d_x0, d_y, d_enc_state, d_mt, d_chaos=0; encoder=:GRU,
     cnn=false, out_heads=1, d_hidden=d_x, mtbias_only=false, d_hidden_mt=32,
-    mt_is_linear=true, decoder_fudge_layer=false, model_purpose=:llh)
+    mt_is_linear=true, decoder_fudge_layer=false, model_purpose=:llh, fixb=false)
 
     @assert !(out_heads > 1 && cnn) "cannot have multiple output heads and CNN."
     @argcheck out_heads in 1:2
     @argcheck model_purpose in [:llh, :pred]
+    @assert !(fixb && mtbias_only) "cannot do mtbias AND fix 'b'"
+
     is_pred_model = model_purpose == :pred
 
     # ENCODER TRANSFORM FROM OBS SPACE => ENC SPACE
@@ -494,9 +535,14 @@ function create_model(d_x, d_x0, d_y, d_enc_state, d_mt, d_chaos=0; encoder=:GRU
     ###################################################
 
     if !mtbias_only
-        d_out = d_x*(d_x+1)*3
+        d_out = !fixb ? 3*d_x*(d_x+1) : 3*d_x^2
         par_gen_net = mt_is_linear ? mlp(d_mt+d_chaos, d_out) : mlp(d_mt+d_chaos, d_hidden_mt, d_out; activation=tanh)
-        gen_rnn = MTGRU_NoU(d_x, par_gen_net)
+        if !fixb
+            gen_rnn = MTGRU_NoU(d_x, par_gen_net)
+        else
+            MTGRU_b = Flux.param(randn(Float32, d_x*3))
+            mtl_gru = MTGRU_NoU_fixb(d_x, par_gen_net, MTGRU_b)
+        end
         mtbias_decoder = identity
     else
         mtbias_decoder = mt_is_linear ? identity : Dense(d_mt+d_chaos, d_hidden_mt, swish)
@@ -506,7 +552,7 @@ function create_model(d_x, d_x0, d_y, d_enc_state, d_mt, d_chaos=0; encoder=:GRU
 
     if decoder_fudge_layer
         # accidental additional layer in decoder for full MT-model.
-        # (This is really low capacity. 64->64 unit relu; if anything, will probably reduce performance.)
+        # (This is really low capacity. 64->64 unit relu; perhaps as likely to reduce as to improve performance.)
         fudge_layer = Dense(d_x, d_x, relu)
     else
         fudge_layer = identity
