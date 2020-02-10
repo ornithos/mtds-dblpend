@@ -77,7 +77,7 @@ function (m::Seq2SeqModel)(y::AbstractVector; T_steps=70, T_enc=10, reset=true, 
 
     # Set state (no need to `reset'!)
     generator.layers[1].state = x0decoder(x0_smp)  # RHS: d_x0 × nbatch → d_x × nbatch
-    gmove = Flux.has_cuarrays() ? cu : identity   # isn't super important, can probably make `gpu`
+    gmove = Flux.has_cuarrays() ? gpu : identity   # isn't super important, can probably make `gpu`
     yhats = [generator(gmove(zeros(1, nbatch))) for t in 1:T_steps]
 end
 

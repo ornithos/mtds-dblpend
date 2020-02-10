@@ -2,7 +2,7 @@ module modelutils
 
 using Flux   # must be Flux@0.90
 using BSON
-using ArgCheck
+using ArgCheck, Dates
 
 export save, load!, chan3cat, unsqueeze, MultiDense, mlp, BRNNenc, randn_repar
 
@@ -21,6 +21,8 @@ if Flux.has_cuarrays()
     # note I'm using cu(zeros(...)), cu(randn(...)), CuArrays.randn(...) in particular occasionally
     # (apparently non-deterministically) kept bugging out on the GPU side :/.
     randn_repar(σ::CuArray, n, d, stochastic=true) = !stochastic ? cu(zeros(Float32, n, d)) : σ .* cu(randn(Float32, n,d))
+    randn_repar(σ::TrackedArray{Float32, N, CuArray{Float32,N}}, n, d, stochastic=true) where N =
+        !stochastic ? cu(zeros(Float32, n, d)) : σ .* cu(randn(Float32, n,d))
 end
 
 # Add a third channel to a 2-channel image Tensor

@@ -397,7 +397,7 @@ function amis(log_f, pis, mus, covs::AbstractArray, S::AbstractMatrix, W::Abstra
         ν_S = sample_from_gmm(gmm_smps, pis, mus, covs*IS_tilt, shuffle=false)
 
         log_W = log_f(ν_S) - gmm_llh(ν_S, 1, pis, mus, covs*IS_tilt);
-        ν_W = softmax(vec(log_W));
+        ν_W = Flux.softmax(vec(log_W));
 
 #         (debug && i <= 5) && display(reduce(hcat, [log_f(ν_S), gmm_llh(ν_S, 1, cpis, cmus, ccovs*IS_tilt), ν_W]))
         (debug && i <= 5) && begin; ax = axs[i,1]; abcsmcs.plot_is_vs_target(ν_S[:,1:2], ν_W, ax=ax, c_num=7);

@@ -249,9 +249,15 @@ function posterior_samples(m::MTSeqModel_E3, y::AbstractVector, yfull::AbstractV
     # RNN 3: Encode the chaos
     # Want a lowdim rep. of departure from expected trajected.
     if c === nothing
-        (x0 === nothing) && (enc_yslices = [enc_tform(yy) for yy in y])
+        !(x0 === nothing) && (enc_yslices = [enc_tform(yy) for yy in y])
+        if !(z === nothing) && size(x0, 2) == 1 && size(z,2) > 1
+            gmove = Flux.has_cuarrays() && z isa Flux.CuArray ? gpu : identity
+            x0z = vcat(x0 * gmove(ones(Float32, 1, size(z,2))), z)
+        else
+            x0z = vcat(x0, z)
+        end
         c, μ_c, σ_c = _posterior_sample(chaos_enc, chaos_post, enc_yslices, length(y),
-            stoch, vcat(x0, z))  # note conditioning on (x0, z) here.
+            stoch, x0z)  # note conditioning on (x0, z) here.
     else
         μ_c, σ_c = nothing, nothing
     end
