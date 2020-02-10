@@ -108,6 +108,79 @@ Flux.hidden(m::BatchedGRUCell_NoU) = m.h
 ##                                                                            ##
 ################################################################################
 
+
+struct MTSeq_CNN end
+struct MTSeq_Single end
+struct MTSeq_Double end
+
+"""
+    MTSeqModel_Pred(enc_tform, init_enc, init_post, mt_enc, mt_post,
+        x0decoder, mtbias_deocder, gen_model, d_y, mtbias_only)
+
+A sequence-to-sequence model 𝒴→𝒴 which imbibes `T_enc` steps of the sequence,
+and predicts `T_steps` (including the original `T_enc`), but unlike the
+`Seq2SeqModel`, the `MTSeqModel_Pred` can *modulate* its prediction based on
+hierarchical 'multi-task' variables. The `Pred` suffix refers to the function
+of the encoders. I had previously made the `E3` suffix version (see docstring),
+but this was optimized for learning a latent representation of the entire
+sequence, which is effective for disentangled-like representation and likelihood
+but less so for prediction, since optimizing the evidence of the **observed**
+sequence appears to perform worse on future observations than an RNN trained
+only to predict. For this model, the encoder learns a latent code that is
+optimized for **predictive** performance, not **reconstructive** performance.
+See the paper, and similar observations have previously been made -- see e.g.
+Karl et al. 2016, Deep VB Filter.
+
+As for the `Seq2SeqModel`, the posterior over the initial state of the generator
+is learned variationally via the `init_enc` RNN with the final state passed to
+the `init_post` layer which generates the mean and variance of the latent
+posterior. Since the posterior is typically lower dimensional than the state of
+the generator network, the latent variable is expanded via the `x0decoder`
+network into the state of the `generator`. The MT variable is encoded with a
+full-length sequence encoding via the `mt_enc` network, and the final state is
+passed to the `mt_post` layer to generate the posterior mean and variance.
+The MT variable enters the generator network either:
+
+1. by predicting all parameters of the network via a `MTGRU_NoU` construction
+(see docstring).
+2. by forming a latent (constant) input at each time step, which functions as a
+variable bias of the generator recurrent cell. This may be directly from the
+latent variables, or via a decoder (`mtbias_decoder`).
+
+Once these variables are sampled, the `generator` is iterated in an open-loop
+fashion for `T_steps`, similar to the `Seq2SeqModel`. The penultimate slot `d`
+is a record of the dimension of 𝒴, used currently just for `show`; and the
+`mtbias_only` variable dictates whether either approach (1) or (2) is used as
+above.
+
+--------------------
+This type can be called via
+```julia
+    m = MTSeqModel_Pred(...)
+    m(y::Vector)
+```
+where `y` is a vector of slices of the sequence for the encoder. This means each
+`y[i]` is an `AbstractMatrix` of size ``d \\times n_{\\text{batch}}`.
+
+Options include `T_enc`, `T_steps` (already discussed), `reset` (which performs
+a state reset before execution; true by default), and `stoch`, whether to
+randomly sample the latent state, or use the state mean (default true).
+"""
+struct MTSeqModel_Pred{U,A,B,V,W,S,N,M}
+    enc_tform::U
+    init_enc::A
+    init_post::B
+    mt_enc::A
+    mt_post::B
+    x0decoder::V
+    mtbias_decoder::W
+    generator::S
+    dec_tform::N
+    model_type::M
+    d::Int64
+    mtbias_only::Bool
+end
+
 """
     MTSeqModel_E3(enc_tform, init_enc, init_post, mt_enc, mt_post, chaos_enc, chaos_post,
         x0decoder, mtbias_deocder, gen_model, d_y, mtbias_only)
@@ -147,21 +220,18 @@ above.
 --------------------
 This type can be called via
 ```julia
-    m = Seq2SeqModel(...)
-    m(y::Vector)
+    m = MTSeqModel_E3(...)
+    m(y::Vector, yfull::Vector)
 ```
-where `y` is a vector of slices of the sequence for the encoder. This means each
-`y[i]` is an `AbstractMatrix` of size ``d \\times n_{\\text{batch}}`.
+where `y` is a vector of slices of the sequence for the encoder, and `yfull` is
+the entire sequence (inc the future) on which to infer the latent MT variable
+`z`. For both `y` and `yfull`, `y[i]` is an `AbstractMatrix` of size
+``d \\times n_{\\text{batch}}`.
 
 Options include `T_enc`, `T_steps` (already discussed), `reset` (which performs
 a state reset before execution; true by default), and `stoch`, whether to
 randomly sample the latent state, or use the state mean (default true).
 """
-
-struct MTSeq_CNN end
-struct MTSeq_Single end
-struct MTSeq_Double end
-
 struct MTSeqModel_E3{U,A,B,V,W,S,N,M}
     enc_tform::U
     init_enc::A
@@ -179,54 +249,85 @@ struct MTSeqModel_E3{U,A,B,V,W,S,N,M}
     mtbias_only::Bool
 end
 
+# Define union type for convenience
+MTSeqModels{U,A,B,V,W,S,N,M} = Union{MTSeqModel_Pred{U,A,B,V,W,S,N,M}, MTSeqModel_E3{U,A,B,V,W,S,N,M}}
+
+# Model utils
+Flux.@treelike MTSeqModel_Pred
 Flux.@treelike MTSeqModel_E3
-unpack(m::MTSeqModel_E3) = Flux.children(m)[1:11] # unpack struct; exclude `d`, `mtbias_only`.
+model_type(m::MTSeqModels{U,A,B,V,W,S,N,M}) where {U,A,B,V,W,S,N,M} = M
 
-modelutils.load!(m::MTSeqModel_E3, fname::String) = load!(Flux.params(m), fname)
+unpack(m::MTSeqModel_Pred) = Flux.children(m)[1:9] # unpack struct; exclude `d`, `mtbias_only`.
+unpack(m::MTSeqModel_E3) = Flux.children(m)[1:11]
+unpack_inference(m::MTSeqModel_Pred) = Flux.children(m)[1:5]
+unpack_inference(m::MTSeqModel_E3) = Flux.children(m)[1:7]
+unpack_generative(m::MTSeqModels) = (m.x0decoder, m.mtbias_decoder, m.generator, m.dec_tform)
 
-model_type(m::MTSeqModel_E3{U,A,B,V,W,S,N,M}) where {U,A,B,V,W,S,N,M} = M
+modelutils.load!(m::MTSeqModels, fname::String) = load!(Flux.params(m), fname)
 
-function Base.show(io::IO, l::MTSeqModel_E3)
-    d_x0 = size(l.init_post.Dense1.W, 1)
-    d_mt = size(l.mt_post.Dense1.W, 1)
-    d_c = size(l.chaos_post.Dense1.W, 1)
+function Base.show(io::IO, l::MTSeqModel_Pred)
+    d_x0, d_mt = size(l.init_post.Dense1.W, 1), size(l.mt_post.Dense1.W, 1)
     out_type = Dict(MTSeq_CNN=>"CNN", MTSeq_Single=>"Deterministic", MTSeq_Double=>"Probabilistic")[model_type(l)]
     mttype = l.mtbias_only ? "Bias-only" : "Full-MT Recurrent Cell"
-    print(io, "MTSeqModel_E3(", mttype, ", d_x0=", d_x0, ", d_mt=", d_mt, ", d_chaos=", d_c, ", ", out_type, ")")
+    print(io, "MTSeqModel_Pred(", mttype, ", d_x0=", d_x0, ", d_mt=", d_mt, ", ", out_type, ") -- for prediction")
+end
+
+function Base.show(io::IO, l::MTSeqModel_E3)
+    d_x0, d_mt, d_c = size(l.init_post.Dense1.W, 1), size(l.mt_post.Dense1.W, 1), size(l.chaos_post.Dense1.W, 1)
+    out_type = Dict(MTSeq_CNN=>"CNN", MTSeq_Single=>"Deterministic", MTSeq_Double=>"Probabilistic")[model_type(l)]
+    mttype = l.mtbias_only ? "Bias-only" : "Full-MT Recurrent Cell"
+    print(io, "MTSeqModel_E3(", mttype, ", d_x0=", d_x0, ", d_mt=", d_mt, ", d_chaos=", d_c, ", ", out_type, ") -- for llh")
 end
 
 
-function (m::MTSeqModel_E3)(x0::AbstractVecOrMat, z::AbstractVecOrMat, c::AbstractVecOrMat; T_steps=70)
+################################################################################
+##                                                                            ##
+##                                Forward Model                               ##
+##                                                                            ##
+################################################################################
 
-    x0decoder, mtbias_decoder, gen_model, dec_tform = unpack(m)[8:11]
-
-    # Generative model
-    # --------------------------------------------------
-    if m.mtbias_only
-        gen_model.state = x0decoder(x0)
-        mtbias = mtbias_decoder(vcat(z, c))   # if linear, this is just the identity ∵ GRUCell.Wi
-        return [dec_tform(gen_model(mtbias)) for t in 1:T_steps]
-    else
-        # Get GRU models from samples from the MT GRU model
-        posterior_grus = gen_model(vcat(z, c)) # output: BatchedGRU (def. above)
-        # Set state (batch-wise) to x0 sample
-        posterior_grus.state = x0decoder(x0)  # 2×linear d_x0 × nbatch → d_x × nbatch
-        # Run generative model
-        return [dec_tform(posterior_grus()) for t in 1:T_steps]
-    end
+function (m::MTSeqModel_Pred)(y::AbstractVector; T_steps=70, T_enc=10, stoch=true)
+    x0, z = posterior_samples(m, y; T_enc=T_enc, stoch=stoch)[1]
+    return m(x0, z; T_steps=T_steps)
 end
-
 
 function (m::MTSeqModel_E3)(y::AbstractVector, yfull::AbstractVector; T_steps=70, T_enc=10, stoch=true)
-    x0, z, c = posterior_samples(m, y, yfull; T_steps=T_steps, T_enc=T_enc, stoch=stoch)[1]
+    x0, z, c = posterior_samples(m, y, yfull; T_enc=T_enc, stoch=stoch)[1]
     return m(x0, z, c; T_steps=T_steps)
+end
+
+# ------------------- Forward Model (inference section) ----------------------
+
+function posterior_samples(m::MTSeqModel_Pred, y::AbstractVector, yfull::AbstractVector=[];
+    T_enc=10, stoch=true, x0=nothing, z=nothing, c=nothing)
+
+    enc_tform, init_enc, init_post, mt_enc, mt_post = unpack_inference(m)
+    (x0 === nothing || z === nothing) && (enc_yslices = [enc_tform(yy) for yy in y])
+
+    # RNN 1: Amortized inference for initial state, h0, of generator
+    if x0 === nothing
+        x0, μ_x0, σ_x0 = _posterior_sample(init_enc, init_post, enc_yslices, T_enc, stoch)
+    else
+        μ_x0, σ_x0 = nothing, nothing
+    end
+
+    # RNN 2: Amortized inference for z
+    # Technically this should be conditioned on the sample x₀, nevertheless, the posterior
+    # of x0 is usually very tight, and the `mt_enc` has access to the same information.
+    if z === nothing
+        z, μ_z, σ_z = _posterior_sample(mt_enc, mt_post, enc_yslices, T_enc, stoch)
+    else
+        μ_z, σ_z = nothing, nothing
+    end
+
+    return (x0,z), (μ_x0, μ_z), (σ_x0, σ_z)
 end
 
 
 function posterior_samples(m::MTSeqModel_E3, y::AbstractVector, yfull::AbstractVector;
-    T_steps=70, T_enc=10, stoch=true, x0=nothing, z=nothing, c=nothing)
+    T_enc=10, stoch=true, x0=nothing, z=nothing, c=nothing)
 
-    enc_tform, init_enc, init_post, mt_enc, mt_post, chaos_enc, chaos_post = unpack(m)[1:7]
+    enc_tform, init_enc, init_post, mt_enc, mt_post, chaos_enc, chaos_post = unpack_inference(m)
 
     # RNN 1: Amortized inference for initial state, h0, of generator
     if x0 === nothing
@@ -237,8 +338,6 @@ function posterior_samples(m::MTSeqModel_E3, y::AbstractVector, yfull::AbstractV
     end
 
     # RNN 2: Amortized inference for z
-    # Technically this should be conditioned on the sample x₀, nevertheless, the posterior
-    # of x0 is usually very tight, and the `mt_enc` has access to the same information.
     if z === nothing
         enc_fullseqs = [enc_tform(yy) for yy in yfull]
         z, μ_z, σ_z = _posterior_sample(mt_enc, mt_post, enc_fullseqs, length(yfull), stoch)
@@ -265,12 +364,87 @@ function posterior_samples(m::MTSeqModel_E3, y::AbstractVector, yfull::AbstractV
 end
 
 
-function create_model(d_x, d_x0, d_y, d_enc_state, d_mt, d_chaos; encoder=:GRU,
+# ------------------- Forward Model (generative section) ----------------------
+# Note in Julia 1.1.1 (where this is developed), it is not possible to add
+# methods to abstract types; hence (m::MTSeqModels)(x0, z, ...) is not possible
+# and so we have the following "private"(!) function which is dispatched to by
+# both types ∈ MTSeqModels. This is fixed in future versions of julia (I think)
+# by https://github.com/JuliaLang/julia/pull/31916.
+function _forward_given_latent(m::MTSeqModels, x0::AbstractVecOrMat, z::AbstractVecOrMat; T_steps=70)
+    x0decoder, mtbias_decoder, gen_model, dec_tform = unpack_generative(m)
+
+    if m.mtbias_only
+        gen_model.state = x0decoder(x0)
+        mtbias = mtbias_decoder(z)   # if linear, this is just the identity ∵ GRUCell.Wi
+        return [dec_tform(gen_model(mtbias)) for t in 1:T_steps]
+    else
+        # Get GRU models from samples from the MT GRU model
+        posterior_grus = gen_model(z) # output: BatchedGRU (def. above)
+        # Set state (batch-wise) to x0 sample
+        posterior_grus.state = x0decoder(x0)  # 2×linear d_x0 × nbatch → d_x × nbatch
+        # Run generative model
+        return [dec_tform(posterior_grus()) for t in 1:T_steps]
+    end
+end
+
+
+(m::MTSeqModel_Pred)(x0::AbstractVecOrMat, z::AbstractVecOrMat; T_steps=70) =
+    _forward_given_latent(m, x0, z; T_steps=T_steps)
+
+# Allow signature for `E3` model to call with separate z, c vars..
+(m::MTSeqModel_E3)(x0::AbstractVecOrMat, z::AbstractVecOrMat,
+    c::AbstractVecOrMat; T_steps=70) = _forward_given_latent(m, x0, vcat(z, c); T_steps=T_steps)
+
+
+# -------------------  Utils for inference section ----------------------------
+
+function _posterior_sample(enc, dec, input, T_max, stochastic=true, input_cat=nothing)
+    Flux.reset!(enc)
+    if input_cat === nothing
+        for tt = 1:T_max; enc(input[tt,:,:]); end
+    else
+        for tt = 1:T_max; enc(vcat(input[tt,:,:], input_cat)); end
+    end
+    μ_, σ_ = dec(enc.state)
+    n, d = size(μ_)
+    smp = μ_ + randn_repar(σ_, n, d, stochastic)
+    return smp, μ_, σ_
+end
+
+function _posterior_sample(enc, dec, input::Vector, T_max, stochastic=true, input_cat=nothing)
+    Flux.reset!(enc)
+    if input_cat === nothing
+        for tt = 1:T_max; enc(input[tt]); end
+    else
+        d, nbatch = size(input[1])
+        if nbatch == 1 && nbatch != size(input_cat,2)
+            gmove = Flux.has_cuarrays() && input_cat isa Flux.CuArray ? gpu : identity
+            input_expander = gmove(ones(Float32, 1, size(input_cat, 2)))
+        else
+            input_expander = 1
+        end
+        for tt = 1:T_max; enc(vcat(input[tt] * input_expander, input_cat)); end
+    end
+    μ_, σ_ = dec(enc.state)
+    n, d = size(μ_)
+    smp = μ_ + randn_repar(σ_, n, d, stochastic)
+    return smp, μ_, σ_
+end
+
+################################################################################
+##                                                                            ##
+##                             Model "Constructor"                            ##
+##                                                                            ##
+################################################################################
+
+function create_model(d_x, d_x0, d_y, d_enc_state, d_mt, d_chaos=0; encoder=:GRU,
     cnn=false, out_heads=1, d_hidden=d_x, mtbias_only=false, d_hidden_mt=32,
-    mt_is_linear=true, decoder_fudge_layer=false)
+    mt_is_linear=true, decoder_fudge_layer=false, model_purpose=:llh)
 
     @assert !(out_heads > 1 && cnn) "cannot have multiple output heads and CNN."
     @argcheck out_heads in 1:2
+    @argcheck model_purpose in [:llh, :pred]
+    is_pred_model = model_purpose == :pred
 
     # ENCODER TRANSFORM FROM OBS SPACE => ENC SPACE
     if cnn
@@ -291,7 +465,7 @@ function create_model(d_x, d_x0, d_y, d_enc_state, d_mt, d_chaos; encoder=:GRU,
         model_type = out_heads == 1 ? MTSeq_Single() : MTSeq_Double()
     end
 
-    # 3× ENCODERS for inference of
+    # 2/3× ENCODERS for inference of
     # (a) initial state (init_enc)
     # (b) sequence level MT variable (mt_enc)
     # (c) local variability due to sensitivity/chaos (mt_chaos)
@@ -299,16 +473,19 @@ function create_model(d_x, d_x0, d_y, d_enc_state, d_mt, d_chaos; encoder=:GRU,
     rnn_constructor = Dict(:LSTM=>LSTM, :GRU=>GRU, :Bidirectional=>BRNNenc)[encoder]
     init_enc = rnn_constructor(d_rnn_in, d_enc_state)             # (a)
     mt_enc = rnn_constructor(d_rnn_in, d_enc_state)               # (b)
-    chaos_enc = rnn_constructor(d_rnn_in+d_mt+d_x0, d_enc_state)  # (c)
+    !(is_pred_model) && (chaos_enc = rnn_constructor(d_rnn_in+d_mt+d_x0, d_enc_state))  # (c)
     (encoder == :Bidirectional) && (d_enc_state *= 2)
 
 
     # POSTERIOR OVER LVM CORR. TO (a), (b), (c)
-    init_post, mt_post, chaos_post = [MultiDense(Dense(d_enc_state, d, identity), Dense(d_enc_state, d, σ))
-        for d in (d_x0, d_mt, d_chaos)]
+    init_post = MultiDense(Dense(d_enc_state, d_x0, identity), Dense(d_enc_state, d_x0, σ))
     init_post.Dense2.b.data .= -2   # initialize posteriors to be low variance
+    mt_post = MultiDense(Dense(d_enc_state, d_mt, identity), Dense(d_enc_state, d_mt, σ))
     mt_post.Dense2.b.data .= -2
-    chaos_post.Dense2.b.data .= -2
+    if !is_pred_model
+        chaos_post = MultiDense(Dense(d_enc_state, d_chaos, identity), Dense(d_enc_state, d_chaos, σ))
+        chaos_post.Dense2.b.data .= -2
+    end
 
     # decode from LV (a) --> size of generative hidden state
     x0decoder = Dense(d_x0, d_x, identity)
@@ -351,35 +528,17 @@ function create_model(d_x, d_x0, d_y, d_enc_state, d_mt, d_chaos; encoder=:GRU,
         )
     end
 
-    return MTSeqModel_E3(tform_enc, init_enc, init_post, mt_enc, mt_post, chaos_enc, chaos_post,
-        x0decoder, mtbias_decoder, gen_rnn, decoder, model_type, d_y, mtbias_only)
+    if is_pred_model
+        m = MTSeqModel_Pred(tform_enc, init_enc, init_post, mt_enc, mt_post,
+            x0decoder, mtbias_decoder, gen_rnn, decoder, model_type, d_y, mtbias_only)
+    else
+        m = MTSeqModel_E3(tform_enc, init_enc, init_post, mt_enc, mt_post, chaos_enc, chaos_post,
+            x0decoder, mtbias_decoder, gen_rnn, decoder, model_type, d_y, mtbias_only)
+    end
+
+    return m
 end
 
-function _posterior_sample(enc, dec, input, T_max, stochastic=true, input_cat=nothing)
-    Flux.reset!(enc)
-    if input_cat === nothing
-        for tt = 1:T_max; enc(input[tt,:,:]); end
-    else
-        for tt = 1:T_max; enc(vcat(input[tt,:,:], input_cat)); end
-    end
-    μ_, σ_ = dec(enc.state)
-    n, d = size(μ_)
-    smp = μ_ + randn_repar(σ_, n, d, stochastic)
-    return smp, μ_, σ_
-end
-
-function _posterior_sample(enc, dec, input::Vector, T_max, stochastic=true, input_cat=nothing)
-    Flux.reset!(enc)
-    if input_cat === nothing
-        for tt = 1:T_max; enc(input[tt]); end
-    else
-        for tt = 1:T_max; enc(vcat(input[tt], input_cat)); end
-    end
-    μ_, σ_ = dec(enc.state)
-    n, d = size(μ_)
-    smp = μ_ + randn_repar(σ_, n, d, stochastic)
-    return smp, μ_, σ_
-end
 
 ################################################################################
 ##                                                                            ##
@@ -387,22 +546,22 @@ end
 ##                                                                            ##
 ################################################################################
 
-function online_inference_BCE(m::MTSeqModel_E3, x0::AbstractVecOrMat, z::AbstractVecOrMat,
-    c::AbstractVecOrMat, y::AbstractVector; T_steps=length(y))
+function online_inference_BCE(m::MTSeqModels, x0::AbstractVecOrMat, z::AbstractVecOrMat,
+    y::AbstractVector; T_steps=length(y))
 
-    x0decoder, mtbias_decoder, gen_model, dec_tform = unpack(m)[8:11]
+    x0decoder, mtbias_decoder, gen_model, dec_tform = unpack_generative(m)
 
     # Generative model
     # --------------------------------------------------
     if m.mtbias_only
         gen_model.state = x0decoder(x0)
-        mtbias = mtbias_decoder(vcat(z, c))   # if linear, this is just the identity ∵ GRUCell.Wi
+        mtbias = mtbias_decoder(z)   # if linear, this is just the identity ∵ GRUCell.Wi
 
         nllh = map(1:T_steps) do t
             _nllh_bernoulli_per_batch(dec_tform(gen_model(mtbias)), y[t])  # y broadcasts over the batch implicitly
         end
     else
-        posterior_grus = gen_model(vcat(z, c)) # output: BatchedGRU (def. above)
+        posterior_grus = gen_model(z) # output: BatchedGRU (def. above)
         posterior_grus.state = x0decoder(x0)  # 2×linear d_x0 × nbatch → d_x × nbatch
 
         nllh = map(1:T_steps) do t
@@ -412,9 +571,14 @@ function online_inference_BCE(m::MTSeqModel_E3, x0::AbstractVecOrMat, z::Abstrac
     return reduce(vcat, nllh)
 end
 
+# Allow signature for `E3` model to call with separate z, c vars..
+online_inference_BCE(m::MTSeqModel_E3, x0::AbstractVecOrMat, z::AbstractVecOrMat, c::AbstractVecOrMat,
+    y::AbstractVector; T_steps=length(y)) = online_inference_BCE(m, x0, vcat(z,c), y; T_steps=T_steps)
 
-function online_inference_single_BCE(m::MTSeqModel_E3, h0::AbstractVecOrMat, z::AbstractVecOrMat,
-    c::AbstractVecOrMat, y::AbstractArray)
+
+
+function online_inference_single_BCE(m::MTSeqModels, h0::AbstractVecOrMat, z::AbstractVecOrMat,
+    y::AbstractArray)
 
     mtbias_decoder, gen_model, dec_tform = unpack(m)[9:11]
 
@@ -422,20 +586,24 @@ function online_inference_single_BCE(m::MTSeqModel_E3, h0::AbstractVecOrMat, z::
     # --------------------------------------------------
     if m.mtbias_only
         gen_model.state = h0
-        mtbias = mtbias_decoder(vcat(z, c))
+        mtbias = mtbias_decoder(z)
         h_new = gen_model(mtbias)
         nllh = _nllh_bernoulli_per_batch(dec_tform(h_new), y)
     else
-        posterior_grus = gen_model(vcat(z, c)) # output: BatchedGRU (def. above)
+        posterior_grus = gen_model(z) # output: BatchedGRU (def. above)
         posterior_grus.state = h0  # 2×linear d_x0 × nbatch → d_x × nbatch
         h_new = posterior_grus()
         nllh = _nllh_bernoulli_per_batch(dec_tform(h_new), y)
     end
-    return nllh, h_new
+    return vec(nllh), h_new
 end
 
+# Allow signature for `E3` model to call with separate z, c vars..
+online_inference_single_BCE(m::MTSeqModel_E3, h0::AbstractVecOrMat, z::AbstractVecOrMat,
+    c::AbstractVecOrMat, y::AbstractArray) = online_inference_single_BCE(m, h0, vcat(z,c), y)
 
-function _nllh_bernoulli(m::MTSeqModel_E3, y::AbstractVector, yfull::AbstractVector;
+
+function _nllh_bernoulli(m::MTSeqModels, y::AbstractVector, yfull::AbstractVector;
         T_steps=70, T_enc=10, stoch=true)
     yhats = m(y, yfull; T_steps=T_steps, T_enc=T_enc, stoch=stoch)
     _nllh_bernoulli(yhats, y)
@@ -449,7 +617,7 @@ _nllh_bernoulli(ŷ::AbstractArray, y::AbstractArray) = sum(Flux.logitbinarycros
 _nllh_bernoulli_per_batch(ŷ::AbstractArray, y::AbstractArray) =
     let n=size(ŷ)[end]; res=Flux.logitbinarycrossentropy.(ŷ, y); sum(reshape(res, :, n), dims=1); end
 
-function _nllh_gaussian(m::MTSeqModel_E3, y::AbstractVector, yfull::AbstractVector;
+function _nllh_gaussian(m::MTSeqModels, y::AbstractVector, yfull::AbstractVector;
         T_steps=70, T_enc=10, stoch=true)
     model_out = m(y, yfull; T_steps=T_steps, T_enc=T_enc, stoch=stoch)
     _nllh_gaussian(model_out, y)
@@ -458,7 +626,7 @@ end
 _nllh_gaussian(ŷ_lσ::AbstractVector, y::AbstractVector) =
     0.5*sum([((ŷŷ, ll) = ŷl; δ=yy-ŷŷ; sum(δ.*δ./(exp.(2*ll)))+sum(ll)) for (ŷl, yy) in zip(ŷ_lσ, y)])
 
-function _nllh_gaussian_constvar(m::MTSeqModel_E3, y::AbstractVector, yfull::AbstractVector;
+function _nllh_gaussian_constvar(m::MTSeqModels, y::AbstractVector, yfull::AbstractVector;
         T_steps=70, T_enc=10, stoch=true, logstd=-2.5)
     yhats = m(y, yfull; T_steps=T_steps, T_enc=T_enc, stoch=stoch)
     _nllh_gaussian_constvar(yhats, y, logstd)
@@ -468,15 +636,15 @@ _nllh_gaussian_constvar(ŷ::AbstractVector, y::AbstractVector, logstd::Number) 
     0.5*sum([(δ=yy-ŷŷ; sum(δ.*δ./(exp.(2*logstd)))+sum(logstd);) for (ŷŷ, yy) in zip(ŷ, y)])
 
 
-nllh(m::MTSeqModel_E3{U,A,B,V,W,S,N,M}, y::AbstractVector, yfull::AbstractVector;
+nllh(m::MTSeqModels{U,A,B,V,W,S,N,M}, y::AbstractVector, yfull::AbstractVector;
     T_steps=70, T_enc=10, stoch=true, logstd=-2.5) where {U,A,B,V,W,S,N,M <: MTSeq_CNN} =
         _nllh_bernoulli(m, y, yfull, T_steps=T_steps, T_enc=T_enc, stoch=stoch)
 
-nllh(m::MTSeqModel_E3{U,A,B,V,W,S,N,M}, y::AbstractVector, yfull::AbstractVector;
+nllh(m::MTSeqModels{U,A,B,V,W,S,N,M}, y::AbstractVector, yfull::AbstractVector;
     T_steps=70, T_enc=10, stoch=true, logstd=-2.5) where {U,A,B,V,W,S,N,M <: MTSeq_Single} =
         _nllh_gaussian_constvar(m, y, yfull, T_steps=T_steps, T_enc=T_enc, stoch=stoch, logstd=logstd)
 
-nllh(m::MTSeqModel_E3{U,A,B,V,W,S,N,M}, y::AbstractVector, yfull::AbstractVector;
+nllh(m::MTSeqModels{U,A,B,V,W,S,N,M}, y::AbstractVector, yfull::AbstractVector;
     T_steps=70, T_enc=10, stoch=true, logstd=-2.5) where {U,A,B,V,W,S,N,M <: MTSeq_Double} =
         _nllh_bernoulli(m, y, yfull, T_steps=T_steps, T_enc=T_enc, stoch=stoch)
 
@@ -485,40 +653,44 @@ nllh(::Type{MTSeq_Single}, ŷ::AbstractVector, y::AbstractVector; logstd=-2.5) 
 nllh(::Type{MTSeq_Double}, ŷ::AbstractVector, y::AbstractVector; logstd=-2.5) = _nllh_gaussian(ŷ, y)
 
 
-StatsBase.loglikelihood(m::MTSeqModel_E3, y::AbstractVector, yfull::AbstractVector;
+StatsBase.loglikelihood(m::MTSeqModels, y::AbstractVector, yfull::AbstractVector;
     T_steps=70, T_enc=10, stoch=true, logstd=-2.5) = -nllh(m, y, yfull, T_steps=T_steps,
         T_enc=T_enc, stoch=stoch, logstd=logstd)
 
 
-function _kl_penalty_stoch(β::Vector{T}, μ_x0, μ_z, μ_c, σ_x0, σ_z, σ_c) where T <: Float32
-    kl = 0f0
-    kl = β[1] * 0.5f0 * sum(1 .+ 2*log.(σ_x0.*σ_x0) - μ_x0.*μ_x0 - σ_x0.*σ_x0)
-    kl += β[2] * 0.5f0 * sum(1 .+ 2*log.(σ_z.*σ_z) - μ_z.*μ_z - σ_z.*σ_z)
-    kl += β[3] * 0.5f0 * sum(1 .+ 2*log.(σ_c.*σ_c) - μ_c.*μ_c - σ_c.*σ_c)
+function _gauss_kl_to_N01(μ::AbstractVecOrMat{T}, σ::AbstractVecOrMat{T}) where T
+    T(0.5) * sum(1 .+ 2*log.(σ.*σ) - μ.*μ - σ.*σ)  # x.^2 -> x.*x due to old version of CuArrays / GPU (culiteral pow issue)
+end
+_gauss_kl_to_N01_deterministic(μ::AbstractVecOrMat{T}) where T  = T(0.5) * sum(1 .- μ.*μ)
+
+function _kl_penalty_stoch(β::Vector{T}, μs::Vector{T}, σs::Vector{T}) where T <: Float32
+    @argcheck length(β) == length(μs) == length(σs)
+    kl = zero(T)
+    for j in 1:length(β)
+        kl += β[j] * _gauss_kl_to_N01(μs[j], σs[j])
+    end
+    return kl
 end
 
-function _kl_penalty_det(β::Vector{T}, μ_x0, μ_z, μ_c) where T <: Float32
-    kl = 0f0
-    kl = β[1] * 0.5f0 * sum(1 .- μ_x0.*μ_x0)
-    kl += β[2] * 0.5f0 * sum(1 .- μ_z.*μ_z)
-    kl += β[3] * 0.5f0 * sum(1 .- μ_c.*μ_c)
+function _kl_penalty_deterministic(β::Vector{T}, μs::Vector{T}) where T <: Float32
+    @argcheck length(β) == length(μs)
+    kl = zero(T)
+    for j in 1:length(β)
+        kl += β[j] * _gauss_kl_to_N01_deterministic(μs[j])
+    end
+    return kl
 end
 
-function elbo(m::MTSeqModel_E3{U,A,B,V,W,S,N,M}, y::AbstractVector, yfull::AbstractVector; T_steps=70,
-    T_enc=10, stoch=true, kl_coeff=1f0, βkl=ones(Float32, 3)) where {U,A,B,V,W,S,N,M}
 
-    (x0, z, c), (μ_x0, μ_z, μ_c), (σ_x0, σ_z, σ_c) =
-        posterior_samples(m, y, yfull; T_steps=T_steps, T_enc=T_enc, stoch=stoch)
+function elbo(m::MTSeqModels, y::AbstractVector, yfull::AbstractVector=[]; T_steps=70,
+    T_enc=10, stoch=true, kl_coeff=1f0, βkl=ones(Float32, 3))
 
-    model_out = m(x0, z, c; T_steps=T_steps)
+    smps, μs, σs = posterior_samples(m, y, yfull; T_steps=T_steps, T_enc=T_enc, stoch=stoch)
+    model_out = m(x0, vcat(z, c); T_steps=T_steps)
     recon = -nllh(M, model_out, y)
 
     # ⇒ Initially no KL (Hard EM), and then an annealing sched. cf. Bowman et al. etc?
-    if stoch
-        kl = _kl_penalty_stoch(β, μ_x0, μ_z, μ_c, σ_x0, σ_z, σ_c)
-    else
-        kl = _kl_penalty_det(β, μ_x0, μ_z, μ_c)
-    end
+    kl = stoch ? _kl_penalty_stoch(β, μs, σs) : _kl_penalty_deterministic(β, μs)
     kl = kl * kl_coeff
 
     return - (recon + kl)
