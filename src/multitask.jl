@@ -558,14 +558,14 @@ function online_inference_BCE(m::MTSeqModels, x0::AbstractVecOrMat, z::AbstractV
         mtbias = mtbias_decoder(z)   # if linear, this is just the identity ∵ GRUCell.Wi
 
         nllh = map(1:T_steps) do t
-            _nllh_bernoulli_per_batch(dec_tform(gen_model(mtbias)), y[t])  # y broadcasts over the batch implicitly
+            _nllh_bernoulli(dec_tform(gen_model(mtbias)), y[t])  # y broadcasts over the batch implicitly
         end
     else
         posterior_grus = gen_model(z) # output: BatchedGRU (def. above)
         posterior_grus.state = x0decoder(x0)  # 2×linear d_x0 × nbatch → d_x × nbatch
 
         nllh = map(1:T_steps) do t
-            _nllh_bernoulli_per_batch(dec_tform(posterior_grus()), y[t])  # y broadcasts over the batch implicitly
+            _nllh_bernoulli(dec_tform(posterior_grus()), y[t])  # y broadcasts over the batch implicitly
         end
     end
     return reduce(vcat, nllh)
@@ -588,12 +588,12 @@ function online_inference_single_BCE(m::MTSeqModels, h0::AbstractVecOrMat, z::Ab
         gen_model.state = h0
         mtbias = mtbias_decoder(z)
         h_new = gen_model(mtbias)
-        nllh = _nllh_bernoulli_per_batch(dec_tform(h_new), y)
+        nllh = _nllh_bernoulli(dec_tform(h_new), y)
     else
         posterior_grus = gen_model(z) # output: BatchedGRU (def. above)
         posterior_grus.state = h0  # 2×linear d_x0 × nbatch → d_x × nbatch
         h_new = posterior_grus()
-        nllh = _nllh_bernoulli_per_batch(dec_tform(h_new), y)
+        nllh = _nllh_bernoulli(dec_tform(h_new), y)
     end
     return vec(nllh), h_new
 end
@@ -603,50 +603,35 @@ online_inference_single_BCE(m::MTSeqModel_E3, h0::AbstractVecOrMat, z::AbstractV
     c::AbstractVecOrMat, y::AbstractArray) = online_inference_single_BCE(m, h0, vcat(z,c), y)
 
 
-function _nllh_bernoulli(m::MTSeqModels, y::AbstractVector, yfull::AbstractVector;
-        T_steps=70, T_enc=10, stoch=true)
-    yhats = m(y, yfull; T_steps=T_steps, T_enc=T_enc, stoch=stoch)
-    _nllh_bernoulli(yhats, y)
+function _nllh_bernoulli(ŷ::AbstractVector{T}, y::AbstractVector{T}) where T <: AbstractArray{M,N} where {M,N}
+    @assert N > 1 "Avoiding infinite recursion. " *
+    "Current implementation does not permit nllh of bernoulli vector of vectors. Try unsqueezing."
+    return [_nllh_bernoulli(ŷŷ, yy) for (ŷŷ, yy) in zip(ŷ, y)]
 end
 
-_nllh_bernoulli(ŷ::AbstractVector, y::AbstractVector) =
-    sum([sum(Flux.logitbinarycrossentropy.(ŷŷ, yy)) for (ŷŷ, yy) in zip(ŷ, y)])
-
-_nllh_bernoulli(ŷ::AbstractArray, y::AbstractArray) = sum(Flux.logitbinarycrossentropy.(ŷ, y))
-
-_nllh_bernoulli_per_batch(ŷ::AbstractArray, y::AbstractArray) =
+_nllh_bernoulli(ŷ::AbstractArray, y::AbstractArray) =
     let n=size(ŷ)[end]; res=Flux.logitbinarycrossentropy.(ŷ, y); sum(reshape(res, :, n), dims=1); end
 
-function _nllh_gaussian(m::MTSeqModels, y::AbstractVector, yfull::AbstractVector;
-        T_steps=70, T_enc=10, stoch=true)
-    model_out = m(y, yfull; T_steps=T_steps, T_enc=T_enc, stoch=stoch)
-    _nllh_gaussian(model_out, y)
-end
-
 _nllh_gaussian(ŷ_lσ::AbstractVector, y::AbstractVector) =
-    0.5*sum([((ŷŷ, ll) = ŷl; δ=yy-ŷŷ; sum(δ.*δ./(exp.(2*ll)))+sum(ll)) for (ŷl, yy) in zip(ŷ_lσ, y)])
-
-function _nllh_gaussian_constvar(m::MTSeqModels, y::AbstractVector, yfull::AbstractVector;
-        T_steps=70, T_enc=10, stoch=true, logstd=-2.5)
-    yhats = m(y, yfull; T_steps=T_steps, T_enc=T_enc, stoch=stoch)
-    _nllh_gaussian_constvar(yhats, y, logstd)
-end
+    [((ŷŷ, ll) = ŷl; δ=yy-ŷŷ; sum(δ.*δ./(exp.(2*ll)))/2+sum(ll)/2) for (ŷl, yy) in zip(ŷ_lσ, y)]
 
 _nllh_gaussian_constvar(ŷ::AbstractVector, y::AbstractVector, logstd::Number) =
-    0.5*sum([(δ=yy-ŷŷ; sum(δ.*δ./(exp.(2*logstd)))+sum(logstd);) for (ŷŷ, yy) in zip(ŷ, y)])
+    [(let n=size(ŷ)[end]; δ=yy-ŷŷ; res=sum(δ.*δ./(exp.(2*logstd)))/2+sum(logstd)/2;
+    sum(reshape(res, :, n), dims=1); end) for (ŷŷ, yy) in zip(ŷ, y)]
 
-
-nllh(m::MTSeqModels{U,A,B,V,W,S,N,M}, y::AbstractVector, yfull::AbstractVector;
-    T_steps=70, T_enc=10, stoch=true, logstd=-2.5) where {U,A,B,V,W,S,N,M <: MTSeq_CNN} =
-        _nllh_bernoulli(m, y, yfull, T_steps=T_steps, T_enc=T_enc, stoch=stoch)
+function nllh(m::MTSeqModels{U,A,B,V,W,S,N,M}, y::AbstractVector, yfull::AbstractVector=[];
+    T_steps=70, T_enc=10, stoch=true) where {U,A,B,V,W,S,N,M <: MTSeq_CNN}
+    x0_z_c = posterior_samples(m, y, yfull; T_enc=T_enc, stoch=stoch)[1]
+    online_inference_BCE(m::MTSeqModels, x0_z_c..., y; T_steps=T_steps)
+end
 
 nllh(m::MTSeqModels{U,A,B,V,W,S,N,M}, y::AbstractVector, yfull::AbstractVector;
     T_steps=70, T_enc=10, stoch=true, logstd=-2.5) where {U,A,B,V,W,S,N,M <: MTSeq_Single} =
-        _nllh_gaussian_constvar(m, y, yfull, T_steps=T_steps, T_enc=T_enc, stoch=stoch, logstd=logstd)
+        vcat(_nllh_gaussian_constvar(m(y, yfull; T_steps=T_steps, T_enc=T_enc, stoch=stoch), y, logstd)...)
 
 nllh(m::MTSeqModels{U,A,B,V,W,S,N,M}, y::AbstractVector, yfull::AbstractVector;
-    T_steps=70, T_enc=10, stoch=true, logstd=-2.5) where {U,A,B,V,W,S,N,M <: MTSeq_Double} =
-        _nllh_bernoulli(m, y, yfull, T_steps=T_steps, T_enc=T_enc, stoch=stoch)
+    T_steps=70, T_enc=10, stoch=true) where {U,A,B,V,W,S,N,M <: MTSeq_Double} =
+        vcat(_nllh_gaussian(m(y, yfull; T_steps=T_steps, T_enc=T_enc, stoch=stoch), y)...)
 
 nllh(::Type{MTSeq_CNN}, ŷ::AbstractVector, y::AbstractVector; logstd=-2.5) = _nllh_bernoulli(ŷ, y)
 nllh(::Type{MTSeq_Single}, ŷ::AbstractVector, y::AbstractVector; logstd=-2.5) = _nllh_gaussian_constvar(ŷ, y, logstd)
