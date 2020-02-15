@@ -1,6 +1,6 @@
 module mtmodel
 
-using Flux, ArgCheck, StatsBase
+using Flux, ArgCheck, StatsBase, YAML
 using Flux: gate
 using Flux.Tracker: istracked
 
@@ -627,6 +627,56 @@ function create_model(d_x, d_x0, d_y, d_enc_state, d_mt, d_chaos=0; encoder=:GRU
     return m
 end
 
+
+"""
+    create_model_opt_dict(...)
+Takes same arguments as `create_model` but just wraps up arguments in a Dict for
+saving out as JSON/YAML/BSON etc.
+"""
+function create_model_opt_dict(d_x, d_x0, d_y, d_enc_state, d_mt, d_chaos=0; encoder=:GRU,
+    cnn=false, out_heads=1, d_hidden=d_x, mtbias_only=false, d_hidden_mt=32,
+    mt_is_linear=true, decoder_fudge_layer=false, model_purpose=:llh, fixb=false,
+    fixb_version=nothing)
+
+    Dict("d_x"=>d_x, "d_x0"=>d_x0, "d_y"=>d_y, "d_enc_state"=>d_enc_state, "d_mt"=>d_mt, "d_chaos"=>d_chaos,
+    "encoder"=>encoder, "cnn"=>cnn, "out_heads"=>out_heads, "d_hidden"=>d_hidden, "mtbias_only"=>mtbias_only,
+    "d_hidden_mt"=>d_hidden_mt, "mt_is_linear"=>mt_is_linear, "decoder_fudge_layer"=>decoder_fudge_layer,
+    "model_purpose"=>model_purpose, "fixb"=>fixb, "fixb_version"=>fixb_version)
+end
+
+
+"""
+    load_model_from_def(ymlfile)
+We have YAML files saved with metadata associated with the model parameters
+in the /data folder. These YAML files point to the relevant parameters too, and
+so suffices to construct the model and load the parameters. That is the purpose
+of this function.
+"""
+function load_model_from_def(ymlfile::String)
+    model_details = YAML.load_file(ymlfile)
+    filename = model_details["filename"]
+    constructor = model_details["constructor"]
+    @argcheck constructor == "mtmodel.create_model"
+    D = model_details["model_def"]
+    D["encoder"] = Symbol(D["encoder"])
+    D["model_purpose"] = Symbol(D["model_purpose"])
+    m = create_model(D["d_x"], D["d_x0"], D["d_y"], D["d_enc_state"], D["d_mt"], D["d_chaos"];
+        encoder=D["encoder"], cnn=D["cnn"], out_heads=D["out_heads"], d_hidden=D["d_hidden"],
+        mtbias_only=D["mtbias_only"], d_hidden_mt=D["d_hidden_mt"], mt_is_linear=D["mt_is_linear"],
+        decoder_fudge_layer=D["decoder_fudge_layer"], model_purpose=D["model_purpose"], fixb=D["fixb"],
+        fixb_version=D["fixb_version"])
+    modelutils.load!(m, filename)
+    return m
+end
+
+# # Example saving model info
+# YAML.write_file("saved_models/mtgru_video_fixbgrp_pred_450.yml", Dict(
+#     "filename"=>"data/mtgru_video_fixbgrp_pred_450.bson",
+#     "description"=>"MT GRU model with posterior mean GROUPED BY SEQ IDENTITY fixed (v2) bias. 450x2 epochs. T=80, Tenc=20.",
+#     "constructor"=>"mtmodel.create_model",
+#     "model_def"=>mtmodel.create_model_opt_dict(64, 6, 4, 40, 2; encoder=:GRU, cnn=true, d_hidden=128,
+#     model_purpose=:pred, mtbias_only=false, decoder_fudge_layer=true, fixb=true, fixb_version=2)
+# ))
 
 ################################################################################
 ##                                                                            ##

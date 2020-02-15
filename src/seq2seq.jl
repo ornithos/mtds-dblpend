@@ -1,6 +1,6 @@
 module seq2seq
 
-using Flux, ArgCheck, StatsBase
+using Flux, ArgCheck, StatsBase, YAML
 
 using ..modelutils
 import ..modelutils: load!, randn_repar
@@ -168,5 +168,42 @@ function create_model(d_x, d_x0, d_y, d_enc_state; encoder=:LSTM,
     return Seq2SeqModel(enc_rnn, post_x0, x0decoder, gen_model, d_y)
 end
 
+"""
+    create_model_opt_dict(...)
+Takes same arguments as `create_model` but just wraps up arguments in a Dict for
+saving out as JSON/YAML/BSON etc.
+"""
+function create_model_opt_dict(d_x, d_x0, d_y, d_enc_state; encoder=:LSTM,
+    cnn=false, out_heads=1, d_hidden=d_x)
 
+    Dict("d_x"=>d_x, "d_x0"=>d_x0, "d_y"=>d_y, "d_enc_state"=>d_enc_state,
+    "encoder"=>encoder, "cnn"=>cnn, "out_heads"=>out_heads, "d_hidden"=>d_hidden)
+end
+
+"""
+    load_model_from_def(ymlfile)
+We have YAML files saved with metadata associated with the model parameters
+in the /data folder. These YAML files point to the relevant parameters too, and
+so suffices to construct the model and load the parameters. That is the purpose
+of this function.
+"""
+function load_model_from_def(ymlfile::String)
+    model_details = YAML.load_file(ymlfile)
+    filename = model_details["filename"]
+    constructor = model_details["constructor"]
+    @argcheck constructor == "seq2seq.create_model"
+    D = model_details["model_def"]
+    D["encoder"] = Symbol(D["encoder"])
+    m = create_model(D["d_x"], D["d_x0"], D["d_y"], D["d_enc_state"];
+        encoder=D["encoder"], cnn=D["cnn"], out_heads=D["out_heads"], d_hidden=D["d_hidden"])
+    modelutils.load!(m, filename)
+    return m
+end
+# # Example saving model info
+# YAML.write_file("saved_models/video_rnn_128_8_40_T20.yml", Dict(
+#     "filename"=>"data/video_rnn_128_8_40_T20.bson",
+#     "description"=>"Standard GRU model trained in open loop mode. T=80, Tenc=20.",
+#     "constructor"=>"seq2seq.create_model",
+#     "model_def"=>create_model_opt_dict(128, 8, 4, 40, cnn=true)
+# ))
 end
