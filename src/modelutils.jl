@@ -29,6 +29,25 @@ end
 chan3cat(x::AbstractArray{T,4}) where T = cat(x, zero(x)[:,:,1:1,:], dims=3)
 chan3cat(x::AbstractArray{T,3}) where T = cat(x, zero(x)[:,:,1:1], dims=3)
 
+
+"""
+    get_strtype_wo_params(x)
+Useful for models defined here. The print (or typeof) for these structs result
+in the overall type, plus a load of parameters, or details in parentheses. This
+function just returns the first part: the overall type, without all the other
+junk. This uses the Base.show methods, but captures the output via IOBuffer.
+"""
+function get_strtype_wo_params(x)
+    _io = IOBuffer()
+    print(_io, x)    # (does not print to stdout)
+    tstr = String(take!(_io))
+    close(_io)
+    ixparen = findfirst("(", tstr)
+    ixparen === nothing && return tstr
+    return tstr[1:first(ixparen)-1]
+end
+
+
 """
     MultiDense(Dense(in_1, out_1), Dense(in_2, out_2))
 

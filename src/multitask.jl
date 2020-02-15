@@ -5,7 +5,7 @@ using Flux: gate
 using Flux.Tracker: istracked
 
 using ..modelutils
-import ..modelutils: load!, randn_repar, mlp
+import ..modelutils: load!, randn_repar, mlp, get_strtype_wo_params
 export load!
 
 const D_IM = 32
@@ -70,7 +70,7 @@ Base.show(io::IO, l::MTGRU_NoU) =
 
 
 """
-  MTGRU_NoU_fixb(N, G)
+  MTGRU_NoU_fixb(N, G, b)
 Multi-task GRU (Gated Recurrent Unit) model. Produces a GRU layer
 for each value of `z` ∈ Rᵈ which depends on the map `G` inside
 the MTGRU. N = out dimension, G: Rᵈ->R^{nLSTM}. z can be batched
@@ -88,6 +88,16 @@ mutable struct MTGRU_NoU_fixb{F,V}
   b::V
 end
 
+"""
+  MTGRU_NoU_fixb_v2(N, G, b)
+As per `MTGRU_NoU_fixb`, except now only the *state* bias is fixed across all
+tasks. The gate biases depend on `z` just like the `MTGRU_NoU`.
+"""
+mutable struct MTGRU_NoU_fixb_v2{F,V}
+  N::Int
+  G::F
+  b::V
+end
 
 function (m::MTGRU_NoU_fixb)(z, h=nothing)
   N, nB = m.N, size(z, 2)
@@ -97,14 +107,33 @@ function (m::MTGRU_NoU_fixb)(z, h=nothing)
   open_forget_gate = zero(b)   # no backprop, and hence not tracked, even if `b` is.
   open_forget_gate[gate(N, 2), :] .= 1
   b += open_forget_gate
-  h = something(h, Flux.param(zero(b)))
+  h = something(h, istracked(λ) ? Flux.param(zero(b)) : zero(b))
 
   Flux.Recur(BatchedGRUCell_NoU(Wh, b, h))
 end
 
+function (m::MTGRU_NoU_fixb_v2)(z, h=nothing)
+    N, nB = m.N, size(z, 2)
+    λ = m.G(z)
+    Wh = reshape(λ[1:N*N*3,:], N*3, N, nB)
+    gmove = Flux.has_cuarrays() && Tracker.data(z) isa Flux.CuArray ? gpu : identity
+    expander = gmove(ones(eltype(Tracker.data(λ)), 1, nB))
+    b = vcat(λ[N*N*3+1:N*N*3+N*2, :], m.b * expander)
+    open_forget_gate = zero(b)
+    open_forget_gate[gate(N, 2), :] .= 1
+    b += open_forget_gate
+    h = something(h, istracked(λ) ? Flux.param(zero(b)) : zero(b))
+
+    Flux.Recur(BatchedGRUCell_NoU(Wh, b, h))
+end
+
 Flux.@treelike MTGRU_NoU_fixb
 Base.show(io::IO, l::MTGRU_NoU_fixb) =
-print(io, "Multitask-GRU-fixb(", l.N, ", ", typeof(l.G), ", no inputs)")
+print(io, "Multitask-GRU-fixb(", l.N, ", ", typeof(l.G), ", bias vector: ", typeof(l.b), "; no inputs)")
+
+Flux.@treelike MTGRU_NoU_fixb_v2
+Base.show(io::IO, l::MTGRU_NoU_fixb_v2) =
+print(io, "Multitask-GRU-fixb_v2(", l.N, ", ", typeof(l.G), ", bias vector (state only): ", typeof(l.b), "; no inputs)")
 
 
 """
@@ -307,14 +336,14 @@ modelutils.load!(m::MTSeqModels, fname::String) = load!(Flux.params(m), fname)
 function Base.show(io::IO, l::MTSeqModel_Pred)
     d_x0, d_mt = size(l.init_post.Dense1.W, 1), size(l.mt_post.Dense1.W, 1)
     out_type = Dict(MTSeq_CNN=>"CNN", MTSeq_Single=>"Deterministic", MTSeq_Double=>"Probabilistic")[model_type(l)]
-    mttype = l.mtbias_only ? "Bias-only" : "Full-MT Recurrent Cell"
+    mttype = l.mtbias_only ? "Bias-only" : "Full-MT Recurrent Cell (" * get_strtype_wo_params(l.generator) * ")"
     print(io, "MTSeqModel_Pred(", mttype, ", d_x0=", d_x0, ", d_mt=", d_mt, ", ", out_type, ") -- for prediction")
 end
 
 function Base.show(io::IO, l::MTSeqModel_E3)
     d_x0, d_mt, d_c = size(l.init_post.Dense1.W, 1), size(l.mt_post.Dense1.W, 1), size(l.chaos_post.Dense1.W, 1)
     out_type = Dict(MTSeq_CNN=>"CNN", MTSeq_Single=>"Deterministic", MTSeq_Double=>"Probabilistic")[model_type(l)]
-    mttype = l.mtbias_only ? "Bias-only" : "Full-MT Recurrent Cell"
+    mttype = l.mtbias_only ? "Bias-only" : "Full-MT Recurrent Cell (" * get_strtype_wo_params(l.generator) * ")"
     print(io, "MTSeqModel_E3(", mttype, ", d_x0=", d_x0, ", d_mt=", d_mt, ", d_chaos=", d_c, ", ", out_type, ") -- for llh")
 end
 
@@ -389,7 +418,7 @@ function posterior_samples(m::MTSeqModel_E3, y::AbstractVector, yfull::AbstractV
     if c === nothing
         !(x0 === nothing) && (enc_yslices = [enc_tform(yy) for yy in y])
         if !(z === nothing) && size(x0, 2) == 1 && size(z,2) > 1
-            gmove = Flux.has_cuarrays() && z isa Flux.CuArray ? gpu : identity
+            gmove = Flux.has_cuarrays() && Tracker.data(z) isa Flux.CuArray ? gpu : identity
             x0z = vcat(x0 * gmove(ones(Float32, 1, size(z,2))), z)
         else
             x0z = vcat(x0, z)
@@ -478,14 +507,20 @@ end
 
 function create_model(d_x, d_x0, d_y, d_enc_state, d_mt, d_chaos=0; encoder=:GRU,
     cnn=false, out_heads=1, d_hidden=d_x, mtbias_only=false, d_hidden_mt=32,
-    mt_is_linear=true, decoder_fudge_layer=false, model_purpose=:llh, fixb=false)
+    mt_is_linear=true, decoder_fudge_layer=false, model_purpose=:llh, fixb=false,
+    fixb_version=nothing)
 
     @assert !(out_heads > 1 && cnn) "cannot have multiple output heads and CNN."
     @argcheck out_heads in 1:2
     @argcheck model_purpose in [:llh, :pred]
     @assert !(fixb && mtbias_only) "cannot do mtbias AND fix 'b'"
+    @assert !fixb || something(fixb_version, 1) ∈ [1,2] "fixb_version must be in [1,2]."
 
     is_pred_model = model_purpose == :pred
+    if fixb && fixb_version === nothing
+        @warn "fixed bias chosen, but `fixb_version` not specified. Defaulting to v1."
+        fixb_version = 1
+    end
 
     # ENCODER TRANSFORM FROM OBS SPACE => ENC SPACE
     if cnn
@@ -535,13 +570,20 @@ function create_model(d_x, d_x0, d_y, d_enc_state, d_mt, d_chaos=0; encoder=:GRU
     ###################################################
 
     if !mtbias_only
-        d_out = !fixb ? 3*d_x*(d_x+1) : 3*d_x^2
+        d_out = !fixb ? 3*d_x*(d_x+1) : (fixb_version == 1 ? 3*d_x^2 : 3*d_x^2 + 2*d_x)
         par_gen_net = mt_is_linear ? mlp(d_mt+d_chaos, d_out) : mlp(d_mt+d_chaos, d_hidden_mt, d_out; activation=tanh)
         if !fixb
             gen_rnn = MTGRU_NoU(d_x, par_gen_net)
         else
-            MTGRU_b = Flux.param(randn(Float32, d_x*3))
-            mtl_gru = MTGRU_NoU_fixb(d_x, par_gen_net, MTGRU_b)
+            if fixb_version == 1
+                MTGRU_b = Flux.param(randn(Float32, d_x*3))
+                gen_rnn = MTGRU_NoU_fixb(d_x, par_gen_net, MTGRU_b)
+            elseif fixb_version == 2
+                MTGRU_b = Flux.param(randn(Float32, d_x))
+                gen_rnn = MTGRU_NoU_fixb_v2(d_x, par_gen_net, MTGRU_b)
+            else
+                error("fixb_version: Unreachable error.")
+            end
         end
         mtbias_decoder = identity
     else
