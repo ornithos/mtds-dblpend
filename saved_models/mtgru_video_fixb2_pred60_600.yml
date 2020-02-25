@@ -1,0 +1,21 @@
+filename: "data/mtgru_video_fixb2_pred60_600.bson"
+constructor: "mtmodel.create_model"
+model_def:
+  d_x: 64
+  encoder: GRU
+  d_enc_state: 40
+  cnn: true
+  d_chaos: 0
+  d_x0: 6
+  d_mt: 2
+  d_hidden: 128
+  decoder_fudge_layer: true
+  model_purpose: pred
+  d_hidden_mt: 32
+  out_heads: 1
+  mt_is_linear: true
+  fixb: true
+  mtbias_only: false
+  fixb_version: 2
+  d_y: 4
+description: "MT GRU model with (v2) fixed (non-adaptive) bias. 600x2 epochs. T=60 (SHORTER), Tenc=20."

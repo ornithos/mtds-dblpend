@@ -1,0 +1,12 @@
+filename: "data/video_rnn_128_8_40_T20.bson"
+constructor: "seq2seq.create_model"
+model_def:
+  d_x: 128
+  d_enc_state: 40
+  out_heads: 1
+  cnn: true
+  encoder: LSTM
+  d_x0: 8
+  d_y: 4
+  d_hidden: 128
+description: "Standard GRU model trained in open loop mode. T=80, Tenc=20."
