@@ -1,12 +1,17 @@
 # MTDS for Double Pendulum
 
-MTDS applied to video data of a double pendulum. This is code for the updated MTDS project -- for the previous version of the paper see [https://arxiv.org/abs/1910.05026](https://arxiv.org/abs/1910.05026). The details for the double pendulum work are only available in the updated paper which is currently under review.
+MTDS applied to video data of a double pendulum. This is code for the updated MTDS project -- for the previous version of the paper see [https://arxiv.org/abs/1910.05026](https://arxiv.org/abs/1910.05026). The details for the double pendulum work are only available in the updated paper which is currently under review. This repo is therefore not yet properly packaged up for an end user, although it will not take much extra work. For those who are interested, the code is fairly well annotated, and there's some commands to get you started below.
 
-Our goal here is to show that by changing the architecture to an MTDS construct, we can permit customizable predictions from a seq2seq RNN (with convolutional encoder/decoder). An example is shown below:
+Our goal here is to show that by changing the architecture to an MTDS construct, we can permit customizable predictions from a seq2seq RNN (with convolutional encoder/decoder). An example is shown below. Here, the prediction for the first 10 frames is identical (shown with the lighter grey), after which we adjust the latent variable to yield three possible predictions.
 
 <div style="text-align:center"><img src="assets/1x3_41_10.gif" width="800"></div>
 
 For more examples, with some commentary, see [https://sites.google.com/view/mtds-customized-predictions/home](https://sites.google.com/view/mtds-customized-predictions/home).
+
+# Example code usage
+In this example, we load a pre-trained model (please download the data repository from [https://gin.g-node.org/alxbird/dblpendulum](https://gin.g-node.org/alxbird/dblpendulum) -- note
+that the CLI appears not to work for downloading this file, at least if you're not logged into `gin`, so just download it directly from the webpage. Unpack the data into a folder called
+`data` within the structure of this repo. (YAML files in `saved_models` will point here.)
 
 ### Imports / compile code
 ```julia
